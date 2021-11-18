@@ -1,5 +1,5 @@
 # histeq
-CLAHE and AHE methods implemented in Rust with ndarray.
+CLAHE and HE methods implemented in Rust with ndarray.
 
 Reimplementation of https://github.com/inferrna/histogram_equalization so you can use as example of migrating from python+numpy.<br>
 (Currently rust version is about 2 times faster, so it worth that.)<br>
