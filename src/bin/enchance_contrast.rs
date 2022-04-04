@@ -9,6 +9,8 @@ fn main() {
     let method: Method = match method_name.to_lowercase().as_str() {
         "he" => Method::HE,
         "clahe" => Method::CLAHE,
+        "he_hsl" => Method::HE_HSL,
+        "clahe_hsl" => Method::CLAHE_HSL,
         v => panic!("Wrong method: {}", v)
     };
 
