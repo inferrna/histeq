@@ -1,9 +1,11 @@
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Sub};
+use std::process::Output;
 use itertools::Itertools;
 use ndarray::{array, Array1, Array2, Array3, ArrayBase, ArrayView1, ArrayView2, Axis, OwnedRepr, RawData};
 use ndarray_stats::QuantileExt;
-use num_traits::{AsPrimitive, Bounded, FromPrimitive, NumCast, PrimInt, ToPrimitive, Unsigned};
+use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, NumCast, One, PrimInt, ToPrimitive, Unsigned, Zero};
+use num_traits::real::Real;
 
 pub(crate) trait HSL<I> {
     ///Hue value
@@ -48,8 +50,7 @@ impl<I> HSL<I> for ArrayView1<'_, &I> where I: Copy {
     }
 }
 
-pub(crate) trait HSLable:
-PartialEq + PartialOrd + ToPrimitive + Copy + Sub<Output = Self> + Add<Output = Self> + AddAssign
+pub trait HSLable: PartialEq + PartialOrd + AsPrimitive<u64> + AsPrimitive<usize> + AsPrimitive<i32> + AsPrimitive<f32> + ToPrimitive + FromPrimitive + Sized + Copy + Sub<Output = Self> + Add<Output = Self> + AddAssign + One + Zero + Bounded + PartialOrd
 {
 
 }
@@ -60,6 +61,7 @@ impl HSLable for i16 {}
 impl HSLable for u32 {}
 impl HSLable for i32 {}
 impl HSLable for f32 {}
+impl HSLable for f64 {}
 
 fn calc_single_row_hue<I>(row: ArrayView2<I>) -> Array2<f32>
 where I: HSLable
@@ -81,19 +83,35 @@ where I: HSLable
     row.axis_iter(Axis(0)).enumerate().for_each(|(i, rgb)| unsafe {
         let max_idx = rgb.argmax().unwrap_unchecked();
         let max_val_i = rgb[max_idx];
-        let max_val_f = rgb[max_idx].to_f32().unwrap_unchecked();
+        let max_val_f: f32 = rgb[max_idx].as_();
         let min_val = *rgb.min().unwrap_unchecked();
         //dbg!(rgb.shape());
-        let res = if min_val==max_val_i {
+        let res = if min_val == max_val_i {
             array![0.0, 0.0, max_val_f]
         } else {
+            let min_val_f: f32 = min_val.as_();
             let lvs = values[max_idx];
             let (ca, cb, shift) = (rgb[lvs[0]], rgb[lvs[1]], lvs[2] as f32);
-            let saturation = (min_val.to_f32().unwrap_unchecked()) / max_val_f;
-            let diff = (max_val_i - min_val).to_f32().unwrap_unchecked();
-            let h = 60.0 * ( shift + ((ca).to_f32().unwrap_unchecked() - (cb).to_f32().unwrap_unchecked()) / diff );
+            let saturation = min_val_f / max_val_f.max(f32::MIN_POSITIVE);
+            let diff: f32 = (max_val_i - min_val).as_();
+            let ca: f32 = ca.as_();
+            let cb: f32 = cb.as_();
+            let h: f32 = 60.0f32 * ( shift + (ca - cb) / diff.max(f32::MIN_POSITIVE) );
 
-            array![(360.0 + h) % 360.0, saturation, max_val_f]
+            let hue = (360.0 + h) % 360.0;
+
+            assert!(!hue.is_nan());
+            assert!(!saturation.is_nan());
+            assert!(!max_val_f.is_nan());
+            assert!(hue.is_finite());
+            assert!(saturation.is_finite());
+            assert!(max_val_f.is_finite());
+
+            assert!(hue>=0.0);
+            assert!(saturation>=0.0);
+            assert!(max_val_f>=0.0);
+
+            array![hue, saturation, max_val_f]
             //array![(360.0 + h) % 360.0, saturation, 192.0]
         };
         res.assign_to(result.index_axis_mut(Axis(0), i));
@@ -123,18 +141,19 @@ where I: HSLable
 
 
 pub trait HueDist<T> {
-    fn calc_hue_start(&self) -> u32;
-    fn calc_hue_distance(&self) -> f32;
+    fn calc_hue_start(&self) -> T;
+    fn calc_hue_distance(&self) -> T;
 }
 
 impl<T> HueDist<T> for T
-where T: std::ops::Rem<Output = T>, T: Copy + NumCast + AsPrimitive<u32> + FromPrimitive + ToPrimitive + std::ops::Div<Output = T>
+where T: std::ops::Rem<Output = T>, T: HSLable + std::ops::Div<Output = T>, u32: AsPrimitive<T>
 {
-    fn calc_hue_start(&self) -> u32 {
-        unsafe { <u32 as NumCast>::from(self.clone() / T::from(120u32).unwrap_unchecked()).unwrap_unchecked() }
+    fn calc_hue_start(&self) -> T {
+        *self / 120u32.as_()
     }
-    fn calc_hue_distance(&self) -> f32 {
-        unsafe { <f32 as NumCast>::from(self.clone() % T::from(120u32).unwrap_unchecked()).unwrap_unchecked() / 120.0f32 }
+    fn calc_hue_distance(&self) -> T {
+        let f120: T = 120u32.as_();
+        (*self % f120) / f120
     }
 }
 

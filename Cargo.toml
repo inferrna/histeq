@@ -10,8 +10,9 @@ ndarray-stats = "*"
 png = "*"
 itertools = "*"
 image = "*"
-num-traits = "*"
+num-traits = {version = "*", features = ["std"]}
 byteorder = "*"
+plotters = "*"
 
 [features]
 blas = ["ndarray/blas"]
