@@ -1,10 +1,10 @@
 use std::fmt::Debug;
-use std::ops::{Index};
+
 use itertools::Itertools;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView3, Axis, s, Zip};
-use crate::{calc_hist, calc_hist_cdf, clip_hist};
+use crate::{calc_hist_cdf, clip_hist};
 use crate::line_up_colors::{calc_hue, HSL, HSLable, HueDist};
-use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, PrimInt, sign::Unsigned, Signed, ToPrimitive, Zero};
+use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, PrimInt, sign::Unsigned, ToPrimitive, Zero};
 
 fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
 {
@@ -123,8 +123,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let block_m = block_m as isize;
     let block_n = block_n as isize;
 
-    let block_m_step = (block_m / 2);
-    let block_n_step = (block_n / 2);
+    let block_m_step = block_m / 2;
+    let block_n_step = block_n / 2;
 
     let mut array_result: Array2<f32> = Array2::zeros((m as usize, n as usize, ));
 
@@ -132,8 +132,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
     for m_start in (0..m as isize).step_by(block_m_step as usize) {
         for n_start in (0..n as isize).step_by(block_n_step as usize) {
-            let range_i = (m_start..(m_start + block_m_step).min(m as isize));
-            let range_j = (n_start..(n_start + block_n_step).min(n as isize));
+            let range_i = m_start..(m_start + block_m_step).min(m as isize);
+            let range_j = n_start..(n_start + block_n_step).min(n as isize);
             let arr_i = Array1::from_iter(&mut range_i.clone());
             let arr_j = Array1::from_iter(&mut range_j.clone());
 
@@ -146,8 +146,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
             let arr_x1: Array1<f32> = arr_i.mapv(|elem| elem as f32 / block_m as f32) - arr_r.mapv(|elem| elem as f32) - 0.5;
             let arr_y1: Array1<f32> = arr_j.mapv(|elem| elem as f32 / block_n as f32) - arr_c.mapv(|elem| elem as f32) - 0.5;
 
-            let arr_x1_sub: Array1<f32> = (1.0 - &arr_x1);
-            let arr_y1_sub: Array1<f32> = (1.0 - &arr_y1);
+            let arr_x1_sub: Array1<f32> = 1.0 - &arr_x1;
+            let arr_y1_sub: Array1<f32> = 1.0 - &arr_y1;
 
             let new_x_shape = (arr_x1.shape()[0], 1);
 

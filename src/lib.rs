@@ -2,23 +2,23 @@ mod line_up_colors;
 mod he_clahe_hsl;
 mod plot_histogram;
 
-use std::cmp::Ordering;
+
 use std::fmt::Debug;
 use std::fs::File;
 use std::io::{BufWriter, Cursor};
-use std::ops::{AddAssign, Deref, Mul, Sub};
+
 use std::path::Path;
 use byteorder::BigEndian;
-use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
+use image::{DynamicImage, GrayImage, RgbImage};
 use byteorder::ReadBytesExt;
-use png::{BitDepth, Info};
-use ndarray::{s, Array0, Array1, Array2, Array3, ArrayView2, Axis, Array, Zip, ArrayViewMut2, ArrayView3, Ix3};
+use png::{BitDepth};
+use ndarray::{s, Array1, Array2, Array3, ArrayView2, Axis, Zip};
 use ndarray_stats::QuantileExt;
-use itertools::{Itertools};
-use num_traits::{Bounded, FromPrimitive, One, PrimInt, sign::Unsigned, ToPrimitive, Zero};
+
+use num_traits::{Bounded, FromPrimitive, PrimInt, sign::Unsigned, ToPrimitive};
 use image::io::Reader as ImageReader;
 use crate::he_clahe_hsl::{clahe_2d_hsl, he_2d_hsl};
-use crate::line_up_colors::{calc_hue, HSL, HSLable, HueDist};
+use crate::line_up_colors::{HSLable};
 
 #[derive(Copy, Clone, PartialEq, Eq, Hash)]
 pub enum Method {
@@ -72,12 +72,12 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
             let array_image = Array3::from_shape_vec((h, w, cc), buffer_u16).unwrap();
             let result_bytes = equalize_full_image(&array_image, blocks, method);
 
-            let mut buffer_u8_le = result_bytes.into_iter().map(|v: u16| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+            let buffer_u8_le = result_bytes.into_iter().map(|v: u16| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&buffer_u8_le).unwrap();
 
         }
-        v => {panic!("Supposed to be 8 or 16 bit image, got {:?}", v)}
+        v => {panic!("Supposed to be 8 or 16 bit image, got {v:?}")}
     }
 }
 
@@ -87,7 +87,7 @@ fn load_8bit_img_as_array(filename: &str) -> (usize, Array3<u8>) { //Level, data
     let (bm, cc) = match image {
         DynamicImage::ImageLuma8(i) => {(i.into_vec(), 1)},
         DynamicImage::ImageRgb8(i) => {(i.into_vec(), 3)},
-        v => {panic!("Supposed to be 8 bit image, got {:?}", v)}
+        v => {panic!("Supposed to be 8 bit image, got {v:?}")}
     };
     (256, Array3::from_shape_vec((h, w, cc), bm).unwrap())
 }
@@ -115,7 +115,7 @@ fn equalize_full_image<I>(array: &Array3<I>, blocks: usize, method: Method) -> A
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, u32: From<I>, f32: From<I>, usize: From<I>, u64: From<I>, i32: From<I>
 {
     let max_val = u32::from(I::max_value());
-    let (h, w, cc) = if let [hh, ww, ccc] = array.shape().clone() {
+    let (h, w, cc) = if let [hh, ww, ccc] = array.shape() {
         (*hh, *ww, *ccc)
     } else {
         panic!("Supposed to be 3D array")
@@ -134,8 +134,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
         Method::HE_NOISY => {he_2d::<I,NoisyHist>(&brightness)}
         Method::CLAHE_NOISY => {clahe_2d::<I,NoisyHist>(&brightness, blocks)}
     };
-    let tuned_brightness = tuned_brightness.into_shape((h as usize, w as usize)).unwrap();
-    let brightness_f: Array2<f32> = brightness.mapv(|v| f32::from(v.max(I::one()))).into_shape((h as usize, w as usize)).unwrap();
+    let tuned_brightness = tuned_brightness.into_shape((h, w)).unwrap();
+    let brightness_f: Array2<f32> = brightness.mapv(|v| f32::from(v.max(I::one()))).into_shape((h, w)).unwrap();
 
     //Save lima multiplier as image
     let mut brightness_relation_f: Array2<f32> = tuned_brightness.clone() / brightness_f.clone();
@@ -178,13 +178,13 @@ fn he_2d<I,H>(img_array: &Array2<I>) -> Array2<f32>
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded, usize: From<I>, f32: From<I>,
       H: Historator<I>
 {
-    let level: usize = I::max_value().as_();
+    let _level: usize = I::max_value().as_();
     let mut hist = H::calc_hist(&img_array.view());
-    let max_hist = hist.max().unwrap().ceil() as usize;
+    let _max_hist = hist.max().unwrap().ceil() as usize;
     //dbg!(max_hist);
     //plot_histogram::plot(&format!("/tmp/plots/single_orig.png"), &hist, max_hist);
     clip_hist(&mut hist, 8.0);
-    let max_hist_clipped = hist.max().unwrap().ceil() as usize;
+    let _max_hist_clipped = hist.max().unwrap().ceil() as usize;
     //dbg!(max_hist_clipped);
     //plot_histogram::plot(&format!("/tmp/plots/single_clip.png"), &hist, max_hist_clipped);
     let hist_cdf: Array1<f32> = calc_hist_cdf(&hist, usize::from(I::max_value())+1);
@@ -233,8 +233,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let block_m = block_m as isize;
     let block_n = block_n as isize;
 
-    let block_m_step = (block_m / 2);
-    let block_n_step = (block_n / 2);
+    let block_m_step = block_m / 2;
+    let block_n_step = block_n / 2;
 
     let mut array_result: Array2<f32> = Array2::zeros((m as usize, n as usize,));
 
@@ -242,8 +242,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
     for m_start in (0..m as isize).step_by(block_m_step as usize) {
         for n_start in (0..n as isize).step_by(block_n_step as usize) {
-            let range_i = (m_start..(m_start + block_m_step).min(m as isize));
-            let range_j = (n_start..(n_start + block_n_step).min(n as isize));
+            let range_i = m_start..(m_start + block_m_step).min(m as isize);
+            let range_j = n_start..(n_start + block_n_step).min(n as isize);
             let arr_i = Array1::from_iter(&mut range_i.clone());
             let arr_j = Array1::from_iter(&mut range_j.clone());
 
@@ -256,10 +256,10 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
             let arr_x1: Array1<f32> = arr_i.mapv(|elem| elem as f32 / block_m as f32) - arr_r.mapv(|elem| elem as f32) - 0.5;
             let arr_y1: Array1<f32> = arr_j.mapv(|elem| elem as f32 / block_n as f32) - arr_c.mapv(|elem| elem as f32) - 0.5;
 
-            let arr_x1_sub: Array1<f32> = (1.0 - &arr_x1);
-            let arr_y1_sub: Array1<f32> = (1.0 - &arr_y1);
+            let arr_x1_sub: Array1<f32> = 1.0 - &arr_x1;
+            let arr_y1_sub: Array1<f32> = 1.0 - &arr_y1;
 
-            let mut new_x_shape = (arr_x1.shape()[0], 1);
+            let new_x_shape = (arr_x1.shape()[0], 1);
 
             let arr_x1 = arr_x1.into_shape(new_x_shape).unwrap();
             let arr_x1_sub = arr_x1_sub.into_shape(new_x_shape).unwrap();
@@ -324,9 +324,9 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
 fn clip_hist(hist: &mut Array1<f32>, threshold: f32) {
     let all_sum = hist.sum();
-    let threshold_value = (threshold * all_sum / hist.len() as f32);
+    let threshold_value = threshold * all_sum / hist.len() as f32;
     let total_extra: f32 = hist.iter().filter(|v| v >= &&threshold_value).map(|v| v - threshold_value).sum();
-    let mean_extra = (total_extra / hist.len() as f32);
+    let mean_extra = total_extra / hist.len() as f32;
 
     hist.map_mut(|v: &mut f32| if *v >= threshold_value {*v = threshold_value + mean_extra} else {*v += mean_extra});
 }
@@ -435,11 +435,11 @@ where I: HSLable + std::convert::TryFrom<i32>
 }
 
 fn calc_hist_cdf(hist: &Array1<f32>, level: usize) -> Array1<f32> {
-    let first_nz = hist.iter().enumerate().find(|(i, v)| v>&&0.0).unwrap().0.max(1);
-    let last_nz = hist.iter().enumerate().rev().find(|(i, v)| v>&&0.0).unwrap().0.max(1);
+    let first_nz = hist.iter().enumerate().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
+    let _last_nz = hist.iter().enumerate().rev().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
     let total_nz = hist.iter().filter(|v| v>&&0.0).count();
     let mut hist_cumsum: Array1<f32> = hist.iter().cloned().collect(); //.take(last_nz+1)
-    let length = hist_cumsum.len();
+    let _length = hist_cumsum.len();
     //let last_nz_tst = [0.0,1.0,2.0,3.0,4.0,5.0].into_iter().enumerate().rev().find(|(i, v)| v>&0.0).unwrap().0;
     //dbg!(length, first_nz, last_nz, last_nz_tst);
     hist_cumsum.accumulate_axis_inplace(Axis(0), |&prev, curr| *curr += prev);
@@ -489,12 +489,12 @@ mod tests {
 
     #[test]
     fn test_local_noise() {
-        let (l, img) = load_8bit_img_as_array("car.png");
+        let (_l, img) = load_8bit_img_as_array("car.png");
         let br_img: Array2<u8> = img.mean_axis(Axis(2)).unwrap();
         let noise_img = calc_local_noise(&br_img.view());
-        let shape_out = noise_img.shape();
+        let shape_out = noise_img.raw_dim();
         let buf = noise_img.into_iter().map(|v| v.round().max(255.0) as u8).collect::<Vec<u8>>();
         let img_out = DynamicImage::ImageLuma8(GrayImage::from_raw(shape_out[1] as u32, shape_out[0] as u32, buf).unwrap());
-        img_out.save("car_noise.png");
+        img_out.save("car_noise.png").unwrap();
     }
 }

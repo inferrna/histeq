@@ -1,10 +1,10 @@
-use std::fmt::Debug;
+
 use std::ops::{Add, AddAssign, Sub};
-use std::process::Output;
-use itertools::Itertools;
-use ndarray::{array, Array1, Array2, Array3, ArrayBase, ArrayView1, ArrayView2, Axis, OwnedRepr, RawData};
+
+
+use ndarray::{array, Array1, Array2, Array3, ArrayView1, ArrayView2, Axis};
 use ndarray_stats::QuantileExt;
-use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, NumCast, One, PrimInt, ToPrimitive, Unsigned, Zero};
+use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, NumCast, One, ToPrimitive, Zero};
 use num_traits::real::Real;
 
 pub(crate) trait HSL<I> {
@@ -160,14 +160,14 @@ where T: std::ops::Rem<Output = T>, T: HSLable + std::ops::Div<Output = T>, u32:
 #[cfg(test)]
 mod tests {
     use image::{DynamicImage, GrayImage};
-    use ndarray::{Array2, Array3, Axis};
-    use crate::{calc_local_noise, load_8bit_img_as_array, Method, transform_any_8bit_image};
+    use ndarray::{Axis};
+    use crate::{load_8bit_img_as_array};
     use crate::line_up_colors::calc_hue;
     use crate::line_up_colors::HSL;
 
     #[test]
     fn test_hue_convertor() {
-        let (l, img) = load_8bit_img_as_array("huetest.png");
+        let (_l, img) = load_8bit_img_as_array("huetest.png");
         let hue_unaligled = calc_hue(&img);
         let hue_aligled = hue_unaligled
             .lanes(Axis(2))
@@ -177,6 +177,6 @@ mod tests {
             .collect::<Vec<u8>>();
         let shape_out = hue_unaligled.shape();
         let img_out = DynamicImage::ImageLuma8(GrayImage::from_raw(shape_out[1] as u32, shape_out[0] as u32, hue_aligled).unwrap());
-        img_out.save("huetest_hue.png");
+        img_out.save("huetest_hue.png").unwrap();
     }
 }

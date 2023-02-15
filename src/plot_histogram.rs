@@ -1,7 +1,7 @@
 use ndarray::Array1;
 use ndarray_stats::QuantileExt;
-use plotters::chart::SeriesLabelPosition::Coordinate;
-use plotters::prelude::{AreaSeries, AsRelative, BLUE, ChartBuilder, Color, IntoDrawingArea, PathElement, RED, BitMapBackend, WHITE};
+
+use plotters::prelude::{AreaSeries, BLUE, ChartBuilder, Color, IntoDrawingArea, RED, BitMapBackend, WHITE};
 
 pub(crate) fn plot(filename: &str, data: &Array1<f32>, max_value: usize) {
     let width = 2048;
