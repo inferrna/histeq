@@ -72,7 +72,7 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
             let array_image = Array3::from_shape_vec((h, w, cc), buffer_u16).unwrap();
             let result_bytes = equalize_full_image(&array_image, blocks, method);
 
-            let buffer_u8_le = result_bytes.into_iter().map(|v: u16| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
+            let buffer_u8_le = result_bytes.into_iter().flat_map(|v: u16| v.to_be_bytes()).collect::<Vec<u8>>();
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&buffer_u8_le).unwrap();
 
@@ -163,8 +163,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
         .save("/tmp/brightness_relation.png").unwrap();
 
 
-    let tuned_brightness = tuned_brightness.into_shape((h as usize, w as usize, 1)).unwrap();
-    let brightness_f = brightness_f.into_shape((h as usize, w as usize, 1)).unwrap();
+    let tuned_brightness = tuned_brightness.into_shape((h, w, 1)).unwrap();
+    let brightness_f = brightness_f.into_shape((h, w, 1)).unwrap();
 
 
     // Align full RGB image
@@ -190,8 +190,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let hist_cdf: Array1<f32> = calc_hist_cdf(&hist, usize::from(I::max_value())+1);
     //plot_histogram::plot(&format!("/tmp/plots/single_cdf.png"), &hist_cdf, level);
 
-    let result = img_array.mapv(|v: I| hist_cdf[usize::from(v)]);
-    result
+    
+    img_array.mapv(|v: I| hist_cdf[usize::from(v)])
 }
 
 fn clahe_2d<I,H>(img_array: &Array2<I>, blocks: usize) -> Array2<f32>
@@ -236,7 +236,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let block_m_step = block_m / 2;
     let block_n_step = block_n / 2;
 
-    let mut array_result: Array2<f32> = Array2::zeros((m as usize, n as usize,));
+    let mut array_result: Array2<f32> = Array2::zeros((m, n,));
 
     let iblocks = blocks as isize;
 
@@ -314,7 +314,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
                 let mapped_mult_sum = mapped_up + mapped_bottom;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
             } else {
-                panic!("Should not be reached! r={}, c={}, iblocks={}", r, c, iblocks)
+                panic!("Should not be reached! r={r}, c={c}, iblocks={iblocks}")
             }
         }
     }

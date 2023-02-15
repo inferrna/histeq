@@ -29,7 +29,7 @@ fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
                  all_hue_arrays[idx][v] += colored_val * (1.0 - dist2next);
                  all_hue_arrays[(idx+1) % 3][v] += colored_val * dist2next;
              });
-    all_hue_arrays.iter_mut().enumerate().map(|(i, mut hist)| {
+    all_hue_arrays.iter_mut().enumerate().map(|(i, hist)| {
         //clip_hist(&mut a, 12.0);
         let possibly_nan = hist.iter().enumerate().find_position(|(_, v)| v.is_nan());
         if let Some((j, _)) = possibly_nan {
@@ -44,8 +44,8 @@ fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
             eprintln!("Found full zeros at {i}");
             hist.clone()
         } else {
-            let hist_cdf = calc_hist_cdf(&hist, level);
-            clip_hist(&mut hist, 4.0);
+            let hist_cdf = calc_hist_cdf(hist, level);
+            clip_hist(hist, 4.0);
             hist_cdf
         }
     }).collect()
@@ -126,7 +126,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let block_m_step = block_m / 2;
     let block_n_step = block_n / 2;
 
-    let mut array_result: Array2<f32> = Array2::zeros((m as usize, n as usize, ));
+    let mut array_result: Array2<f32> = Array2::zeros((m, n, ));
 
     let iblocks = blocks as isize;
 

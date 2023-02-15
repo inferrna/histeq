@@ -22,8 +22,8 @@ pub(crate) fn plot(filename: &str, data: &Array1<f32>, max_value: usize) {
         AreaSeries::new(
             (0..).zip(data.iter()).map(|(x, y)| (x, *y)),
             0.0,
-            &RED.mix(0.2),
-        ).border_style(&BLUE),
+            RED.mix(0.2),
+        ).border_style(BLUE),
     ).unwrap();
     root.present().expect("Unable to write result to file");
 }
