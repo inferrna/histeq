@@ -11,7 +11,7 @@ use std::path::Path;
 use byteorder::BigEndian;
 use image::{DynamicImage, GenericImageView, GrayImage, RgbImage};
 use byteorder::ReadBytesExt;
-use png::BitDepth;
+use png::{BitDepth, Info};
 use ndarray::{s, Array0, Array1, Array2, Array3, ArrayView2, Axis, Array, Zip, ArrayViewMut2, ArrayView3, Ix3};
 use ndarray_stats::QuantileExt;
 use itertools::{Itertools};
@@ -36,29 +36,34 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
     // Use the IDENTITY transformation because by default
     // it will use STRIP_16 which only keep 8 bits.
     decoder.set_transformations(png::Transformations::IDENTITY);
-    let (info, mut reader) = decoder.read_info().unwrap();
+    let mut png_reader = decoder.read_info().unwrap();
+    let info = png_reader.info();
+
+    let (width, height) = (info.width, info.height);
+    let buffer_size = info.raw_bytes();
+    let bit_depth = info.bit_depth;
+    let color_type = info.color_type;
 
     let path_out = Path::new(filename_out);
     let file = File::create(path_out).unwrap();
-    let ref mut w = BufWriter::new(file);
+    let w = &mut BufWriter::new(file);
 
-    let mut encoder = png::Encoder::new(w, info.width, info.height); // Width is 2 pixels and height is 1.
-    encoder.set_color(info.color_type);
-    encoder.set_depth(info.bit_depth);
+    let mut encoder = png::Encoder::new(w, width, height); // Width is 2 pixels and height is 1.
+    encoder.set_color(color_type);
+    encoder.set_depth(bit_depth);
 
-    match info.bit_depth {
+    let mut buffer = vec![0; buffer_size];
+    png_reader.next_frame(&mut buffer).unwrap();
+
+    match bit_depth {
         BitDepth::Eight => {
-            let mut buffer = vec![0; info.buffer_size()];
-            reader.next_frame(&mut buffer).unwrap();
-            let array_image = Array3::from_shape_vec((info.height as usize, info.width as usize, info.color_type.samples()), buffer).unwrap();
+            let array_image = Array3::from_shape_vec((height as usize, width as usize, color_type.samples()), buffer).unwrap();
             let result_bytes = equalize_full_image(&array_image, blocks, method);
             let mut writer = encoder.write_header().unwrap();
-            writer.write_image_data(&result_bytes.into_iter().collect::<Vec<u8>>());
+            writer.write_image_data(&result_bytes.into_iter().collect::<Vec<u8>>()).unwrap();
         }
         BitDepth::Sixteen => {
-            let mut buffer = vec![0; info.buffer_size()];
-            reader.next_frame(&mut buffer).unwrap();
-            let (h, w, cc) = (info.height as usize, info.width as usize, info.color_type.samples());
+            let (h, w, cc) = (height as usize, width as usize, color_type.samples());
             let mut buffer_u16 = vec![0; h * w * cc];
             let mut buffer_cursor = Cursor::new(buffer);
             buffer_cursor
@@ -69,7 +74,7 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
 
             let mut buffer_u8_le = result_bytes.into_iter().map(|v: u16| v.to_be_bytes()).flatten().collect::<Vec<u8>>();
             let mut writer = encoder.write_header().unwrap();
-            writer.write_image_data(&buffer_u8_le);
+            writer.write_image_data(&buffer_u8_le).unwrap();
 
         }
         v => {panic!("Supposed to be 8 or 16 bit image, got {:?}", v)}
@@ -82,7 +87,6 @@ fn load_8bit_img_as_array(filename: &str) -> (usize, Array3<u8>) { //Level, data
     let (bm, cc) = match image {
         DynamicImage::ImageLuma8(i) => {(i.into_vec(), 1)},
         DynamicImage::ImageRgb8(i) => {(i.into_vec(), 3)},
-        DynamicImage::ImageBgr8(i) => {(i.into_vec(), 3)},
         v => {panic!("Supposed to be 8 bit image, got {:?}", v)}
     };
     (256, Array3::from_shape_vec((h, w, cc), bm).unwrap())
@@ -90,7 +94,7 @@ fn load_8bit_img_as_array(filename: &str) -> (usize, Array3<u8>) { //Level, data
 
 
 pub fn transform_any_8bit_image(filename_in: &str, filename_out: &str, blocks: usize, method: Method) {
-    let (level, array) = load_8bit_img_as_array(filename_in);
+    let (_level, array) = load_8bit_img_as_array(filename_in);
 
     let shape = array.shape();
     let h = shape[0] as u32;
@@ -104,7 +108,7 @@ pub fn transform_any_8bit_image(filename_in: &str, filename_out: &str, blocks: u
         1 => DynamicImage::ImageLuma8(GrayImage::from_raw(w, h, result_bytes.into_iter().collect::<Vec<u8>>()).unwrap()),
         _ => unimplemented!()
     };
-    img.save(filename_out);
+    img.save(filename_out).unwrap();
 }
 
 fn equalize_full_image<I>(array: &Array3<I>, blocks: usize, method: Method) -> Array3<I>
@@ -155,7 +159,8 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let cf_brr = 255.0 / br_max;
     brightness_relation_f *= cf_brr;
     let brightness_relation = brightness_relation_f.into_iter().map(|v| v.round() as u8).collect::<Vec<u8>>();
-    DynamicImage::ImageLuma8(GrayImage::from_raw(w as u32, h as u32, brightness_relation).unwrap()).save("/tmp/brightness_relation.png");
+    DynamicImage::ImageLuma8(GrayImage::from_raw(w as u32, h as u32, brightness_relation).unwrap())
+        .save("/tmp/brightness_relation.png").unwrap();
 
 
     let tuned_brightness = tuned_brightness.into_shape((h as usize, w as usize, 1)).unwrap();
@@ -193,8 +198,8 @@ fn clahe_2d<I,H>(img_array: &Array2<I>, blocks: usize) -> Array2<f32>
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, usize: From<I>, u64: From<I>, i32: From<I>, f32: From<I>,
       H: Historator<I>
 {
-    let (m, n) = if let [mm, nn] = img_array.shape().clone() {
-        (*mm as usize, *nn as usize)
+    let (m, n) = if let [mm, nn] = img_array.shape() {
+        (*mm, *nn)
     } else {
         panic!("Supposed to be 2D array")
     };
@@ -216,9 +221,9 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
             let mut hist = H::calc_hist(&block_view);
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_orig.png", i, j), &hist, level);
             //let mut hist = calc_hist_noise(&block_view);
-            clip_hist(&mut hist, 4.0);
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_clip.png", i, j), &hist, level);
             let hist_cdf = calc_hist_cdf(&hist, level);
+            clip_hist(&mut hist, 4.0);
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_cdf.png", i, j), &hist_cdf, level);
             maps[i].push(hist_cdf);
         }
@@ -318,7 +323,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
 
 fn clip_hist(hist: &mut Array1<f32>, threshold: f32) {
-    let all_sum = hist.sum() as f32;
+    let all_sum = hist.sum();
     let threshold_value = (threshold * all_sum / hist.len() as f32);
     let total_extra: f32 = hist.iter().filter(|v| v >= &&threshold_value).map(|v| v - threshold_value).sum();
     let mean_extra = (total_extra / hist.len() as f32);
@@ -432,6 +437,7 @@ where I: HSLable + std::convert::TryFrom<i32>
 fn calc_hist_cdf(hist: &Array1<f32>, level: usize) -> Array1<f32> {
     let first_nz = hist.iter().enumerate().find(|(i, v)| v>&&0.0).unwrap().0.max(1);
     let last_nz = hist.iter().enumerate().rev().find(|(i, v)| v>&&0.0).unwrap().0.max(1);
+    let total_nz = hist.iter().filter(|v| v>&&0.0).count();
     let mut hist_cumsum: Array1<f32> = hist.iter().cloned().collect(); //.take(last_nz+1)
     let length = hist_cumsum.len();
     //let last_nz_tst = [0.0,1.0,2.0,3.0,4.0,5.0].into_iter().enumerate().rev().find(|(i, v)| v>&0.0).unwrap().0;
@@ -439,8 +445,9 @@ fn calc_hist_cdf(hist: &Array1<f32>, level: usize) -> Array1<f32> {
     hist_cumsum.accumulate_axis_inplace(Axis(0), |&prev, curr| *curr += prev);
 
     //Limit contrast range to near original
-    let max_level = ((last_nz + level - 1) / 2).max(1);
     let min_level = first_nz;
+    //let max_level = ((last_nz + level - 1) / 2).max(1);
+    let max_level = (level - 1).min(min_level + total_nz * 25);
 
     // Unlimited contrast
     //let max_level = level - 1;

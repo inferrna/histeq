@@ -1,20 +1,17 @@
-use std::borrow::Borrow;
 use std::fmt::Debug;
-use std::ops::{Deref, Index};
-use std::slice::SliceIndex;
+use std::ops::{Index};
 use itertools::Itertools;
-use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView3, Axis, IntoNdProducer, s, Zip};
+use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView3, Axis, s, Zip};
 use crate::{calc_hist, calc_hist_cdf, clip_hist};
 use crate::line_up_colors::{calc_hue, HSL, HSLable, HueDist};
-use num_traits::real::Real;
-use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, One, PrimInt, sign::Unsigned, Signed, ToPrimitive, Zero};
+use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, PrimInt, sign::Unsigned, Signed, ToPrimitive, Zero};
 
 fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
 {
-    let mut hist_li: Array1<f32> = Array1::zeros((level,));
-    let mut hist_rg: Array1<f32> = Array1::zeros((level,));
-    let mut hist_gb: Array1<f32> = Array1::zeros((level,));
-    let mut hist_br: Array1<f32> = Array1::zeros((level,));
+    let hist_li: Array1<f32> = Array1::zeros((level,));
+    let hist_rg: Array1<f32> = Array1::zeros((level,));
+    let hist_gb: Array1<f32> = Array1::zeros((level,));
+    let hist_br: Array1<f32> = Array1::zeros((level,));
 
     let mut all_hue_arrays = vec![hist_rg, hist_gb, hist_br, hist_li];
 
@@ -36,25 +33,26 @@ fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
         //clip_hist(&mut a, 12.0);
         let possibly_nan = hist.iter().enumerate().find_position(|(_, v)| v.is_nan());
         if let Some((j, _)) = possibly_nan {
-            panic!("Found NaN at {},{}", i, j);
+            panic!("Found NaN at {i},{j}");
         }
         let possibly_inf = hist.iter().enumerate().find_position(|(_, v)| v.is_infinite());
         if let Some((j, _)) = possibly_inf {
-            panic!("Found Inf at {},{}", i, j);
+            panic!("Found Inf at {i},{j}");
         }
         let possibly_not_zeros = hist.iter().find(|v| !v.is_zero());
         if possibly_not_zeros.is_none() {
-            eprintln!("Found full zeros at {}", i);
+            eprintln!("Found full zeros at {i}");
             hist.clone()
         } else {
+            let hist_cdf = calc_hist_cdf(&hist, level);
             clip_hist(&mut hist, 4.0);
-            calc_hist_cdf(&hist, level)
+            hist_cdf
         }
     }).collect()
 }
 
 #[inline]
-fn apply_hist_hsl<I: Copy>(h: &ArrayView1<I>, hists_cdf: &Vec<Array1<I>>) -> I
+fn apply_hist_hsl<I: Copy>(h: &ArrayView1<I>, hists_cdf: &[Array1<I>]) -> I
 where I: HSLable + Debug + Float + std::ops::Mul<Output = I> + HueDist<I>, f32: AsPrimitive<I>
 {
     let v = h.lightness().to_usize().unwrap();
@@ -78,7 +76,7 @@ where I: HSLable
     let w = shape[1];
 
     let hsl_arr = calc_hue(img_array);
-    let mut clipped_hists = calc_hist_hsl(&hsl_arr.view(), level);
+    let clipped_hists = calc_hist_hsl(&hsl_arr.view(), level);
     let hists_cdf: Vec<Array1<f32>> = clipped_hists.into_iter().map(|hist| calc_hist_cdf(&hist, level)).collect();
 
     let result: Array2<f32> = Array2::from_shape_vec((h, w), hsl_arr
@@ -94,8 +92,8 @@ pub fn clahe_2d_hsl<I>(img_array: &Array3<I>, blocks: usize) -> Array2<f32>
 //where I: HSLable
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, usize: From<I>, u64: From<I>, i32: From<I>, f32: From<I>
 {
-    let (m, n) = if let [mm, nn, cc] = img_array.shape().clone() {
-        (*mm as usize, *nn as usize)
+    let (m, n) = if let [mm, nn, _cc] = img_array.shape() {
+        (*mm, *nn)
     } else {
         panic!("Supposed to be 3D array")
     };
@@ -151,7 +149,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
             let arr_x1_sub: Array1<f32> = (1.0 - &arr_x1);
             let arr_y1_sub: Array1<f32> = (1.0 - &arr_y1);
 
-            let mut new_x_shape = (arr_x1.shape()[0], 1);
+            let new_x_shape = (arr_x1.shape()[0], 1);
 
             let arr_x1 = arr_x1.into_shape(new_x_shape).unwrap();
             let arr_x1_sub = arr_x1_sub.into_shape(new_x_shape).unwrap();
@@ -207,7 +205,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
                 let mapped_mult_sum = mapped_up + mapped_bottom;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
             } else {
-                panic!("Should not be reached! r={}, c={}, iblocks={}", r, c, iblocks)
+                panic!("Should not be reached! r={r}, c={c}, iblocks={iblocks}")
             }
         }
     }

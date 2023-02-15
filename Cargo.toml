@@ -9,7 +9,7 @@ ndarray = "*"
 ndarray-stats = "*"
 png = "*"
 itertools = "*"
-image = "*"
+image = "0.24"
 num-traits = {version = "*", features = ["std"]}
 byteorder = "*"
 plotters = "*"
