@@ -8,29 +8,107 @@ use std::fs::File;
 use std::io::{BufWriter, Cursor};
 
 use std::path::Path;
+use std::rc::Rc;
 use byteorder::BigEndian;
 use image::{DynamicImage, GrayImage, RgbImage};
 use byteorder::ReadBytesExt;
-use png::{BitDepth};
-use ndarray::{s, Array1, Array2, Array3, ArrayView2, Axis, Zip};
+use png::BitDepth;
+use ndarray::{Array1, Array2, Array3, ArrayView2, Axis, s, Zip};
 use ndarray_stats::QuantileExt;
 
-use num_traits::{Bounded, FromPrimitive, PrimInt, sign::Unsigned, ToPrimitive};
+use num_traits::{Bounded, FromPrimitive, Num, PrimInt, sign::Unsigned, ToPrimitive};
 use image::io::Reader as ImageReader;
 use crate::he_clahe_hsl::{clahe_2d_hsl, he_2d_hsl};
-use crate::line_up_colors::{HSLable};
+use crate::line_up_colors::HSLable;
+use clap::{Parser, ValueEnum};
+#[cfg(feature = "denoise")]
+use smart_denoise::{Denoiseable, Algo, DenoiseParams, UsingShader};
 
-#[derive(Copy, Clone, PartialEq, Eq, Hash)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash, ValueEnum, Parser)]
 pub enum Method {
+    ///Histogram equalization across all image in HSL color space
     HE_HSL,
+    ///Contrast limited histogram equalization in HSL color space
     CLAHE_HSL,
+    ///Histogram equalization across all image
     HE,
+    ///Contrast limited histogram equalization
     CLAHE,
+    ///Histogram equalization across all image with no respect to noisy pixels
     HE_NOISY,
+    ///Contrast limited histogram equalization with no respect to noisy pixels
     CLAHE_NOISY,
 }
 
-pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize, method: Method) { //Level, data
+#[derive(Debug, Clone)]
+pub struct BlocksCount {
+    size_h: usize,
+    size_w: Option<usize>
+}
+
+#[derive(Debug, Clone)]
+pub struct BrightnessLimits {
+    dark_limit: f32,
+    bright_limit: f32
+}
+
+impl BrightnessLimits {
+    pub fn new(dark_limit: f32, bright_limit: f32) -> Self {
+        Self { dark_limit, bright_limit }
+    }
+}
+
+impl BlocksCount {
+    pub fn new(size_h: usize, size_w: Option<usize>) -> Self {
+        Self { size_h, size_w }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct HEParams {
+    blocks: BlocksCount,
+    limits: BrightnessLimits,
+    denoise: bool,
+}
+
+impl HEParams {
+    pub fn new(blocks: BlocksCount, limits: BrightnessLimits, denoise: bool) -> Self {
+        Self { blocks, limits, denoise }
+    }
+    pub fn blocks(&self) -> &BlocksCount {
+        &self.blocks
+    }
+    pub fn limits(&self) -> &BrightnessLimits {
+        &self.limits
+    }
+    pub fn denoise(&self) -> bool {
+        self.denoise
+    }
+}
+
+#[cfg(feature = "denoise")]
+///Returns original image and denoise variant if denoise was requested. Two copy of original image otherwise.
+fn image_pair_from_buffer<I: Denoiseable>(buffer: Vec<I>, h: usize, w: usize, cc: usize, denoise: bool) -> (Rc<Array3<I>>, Rc<Array3<I>>) {
+    let denoise_params = DenoiseParams::new(3.0, 2.0, 0.185);
+    if denoise {
+        let dnd_buf = smart_denoise::denoise(&buffer, w as u32, h as u32, UsingShader::Compute, denoise_params, false, Algo::Smart);
+        let array_image = Array3::from_shape_vec((h, w, cc), buffer).unwrap();
+        let array2hist = Array3::from_shape_vec((h, w, cc), dnd_buf).unwrap();
+        (Rc::new(array_image), Rc::new(array2hist))
+    } else {
+        let array_image = Rc::new(Array3::from_shape_vec((h, w, cc), buffer).unwrap());
+        (array_image.clone(), array_image)
+    }
+}
+#[cfg(not(feature = "denoise"))]
+///Returns original image and copy of original image.
+fn image_pair_from_buffer<I: Num>(buffer: Vec<I>, h: usize, w: usize, cc: usize, denoise: bool) -> (Rc<Array3<I>>, Rc<Array3<I>>)    {
+    let array_image = Rc::new(Array3::from_shape_vec((h, w, cc), buffer).unwrap());
+    (array_image.clone(), array_image)
+}
+
+
+pub fn transform_png_image(filename_in: &str, filename_out: &str, method: Method, params: &HEParams) { //Level, data
     let img_file = File::open(filename_in).unwrap();
     let mut decoder = png::Decoder::new(img_file);
     // Use the IDENTITY transformation because by default
@@ -55,10 +133,12 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
     let mut buffer = vec![0; buffer_size];
     png_reader.next_frame(&mut buffer).unwrap();
 
+
     match bit_depth {
         BitDepth::Eight => {
-            let array_image = Array3::from_shape_vec((height as usize, width as usize, color_type.samples()), buffer).unwrap();
-            let result_bytes = equalize_full_image(&array_image, blocks, method);
+            let (array_image, array2hist) = image_pair_from_buffer(buffer, height as usize, width as usize, color_type.samples(), params.denoise);
+
+            let result_bytes = equalize_full_image(array_image, array2hist, method, params);
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&result_bytes.into_iter().collect::<Vec<u8>>()).unwrap();
         }
@@ -69,8 +149,8 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, blocks: usize,
             buffer_cursor
                 .read_u16_into::<BigEndian>(&mut buffer_u16)
                 .unwrap();
-            let array_image = Array3::from_shape_vec((h, w, cc), buffer_u16).unwrap();
-            let result_bytes = equalize_full_image(&array_image, blocks, method);
+            let (array_image, array2hist) = image_pair_from_buffer(buffer_u16, height as usize, width as usize, color_type.samples(), params.denoise);
+            let result_bytes = equalize_full_image(array_image, array2hist, method, params);
 
             let buffer_u8_le = result_bytes.into_iter().flat_map(|v: u16| v.to_be_bytes()).collect::<Vec<u8>>();
             let mut writer = encoder.write_header().unwrap();
@@ -93,15 +173,19 @@ fn load_8bit_img_as_array(filename: &str) -> (usize, Array3<u8>) { //Level, data
 }
 
 
-pub fn transform_any_8bit_image(filename_in: &str, filename_out: &str, blocks: usize, method: Method) {
-    let (_level, array) = load_8bit_img_as_array(filename_in);
+pub fn transform_any_8bit_image(filename_in: &str, filename_out: &str, method: Method, params: &HEParams) {
+    let image = ImageReader::open(filename_in).unwrap().decode().unwrap();
+    let (h, w) = (image.height(), image.width());
+    let cc = match image {
+        DynamicImage::ImageLuma8(_) => 1usize,
+        DynamicImage::ImageRgb8(_) => 3,
+        v => {panic!("Supposed to be 8 bit RGB ro GRAY image, got {v:?}")}
+    };
+    let data = image.as_bytes();
 
-    let shape = array.shape();
-    let h = shape[0] as u32;
-    let w = shape[1] as u32;
-    let cc = shape[2];
+    let (array_image, array2hist) = image_pair_from_buffer(data.to_vec(), h as usize, w as usize, cc, params.denoise);
 
-    let result_bytes = equalize_full_image(&array, blocks, method);
+    let result_bytes = equalize_full_image(array_image, array2hist, method, params);
 
     let img: DynamicImage = match cc {
         3 => DynamicImage::ImageRgb8(RgbImage::from_raw(w, h, result_bytes.into_iter().collect::<Vec<u8>>()).unwrap()),
@@ -111,28 +195,29 @@ pub fn transform_any_8bit_image(filename_in: &str, filename_out: &str, blocks: u
     img.save(filename_out).unwrap();
 }
 
-fn equalize_full_image<I>(array: &Array3<I>, blocks: usize, method: Method) -> Array3<I>
+fn equalize_full_image<I>(array: Rc<Array3<I>>, array2hist: Rc<Array3<I>>, method: Method, params: &HEParams) -> Array3<I>
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, u32: From<I>, f32: From<I>, usize: From<I>, u64: From<I>, i32: From<I>
 {
     let max_val = u32::from(I::max_value());
-    let (h, w, cc) = if let [hh, ww, ccc] = array.shape() {
+    let (h, w, cc) = if let [hh, ww, ccc] = array2hist.shape() {
         (*hh, *ww, *ccc)
     } else {
         panic!("Supposed to be 3D array")
     };
     // Brightness level as max value of RGB
     let brightness: Array2<I> = if cc > 1 {
-        array.map_axis(Axis(2), |v| unsafe{ *v.iter().max().unwrap_unchecked() })
+        array2hist.map_axis(Axis(2), |v| unsafe{ *v.iter().max().unwrap_unchecked() })
     } else {
-        array.map_axis(Axis(2), |v|v[0])
+        array2hist.map_axis(Axis(2), |v|v[0])
     };
+
     let tuned_brightness: Array2<f32> = match method {
-        Method::HE_HSL => {he_2d_hsl(array, usize::from(I::max_value())+1)}
-        Method::CLAHE_HSL => {clahe_2d_hsl(array, blocks)}
-        Method::HE => {he_2d::<I,JustHist>(&brightness)}
-        Method::CLAHE => {clahe_2d::<I,JustHist>(&brightness, blocks)}
-        Method::HE_NOISY => {he_2d::<I,NoisyHist>(&brightness)}
-        Method::CLAHE_NOISY => {clahe_2d::<I,NoisyHist>(&brightness, blocks)}
+        Method::HE_HSL => {he_2d_hsl(array2hist.as_ref(), usize::from(I::max_value())+1, params)}
+        Method::CLAHE_HSL => {clahe_2d_hsl(array2hist.as_ref(), params)}
+        Method::HE => {he_2d::<I,JustHist>(&brightness, params)}
+        Method::CLAHE => {clahe_2d::<I,JustHist>(&brightness, params)}
+        Method::HE_NOISY => {he_2d::<I,NoisyHist>(&brightness, params)}
+        Method::CLAHE_NOISY => {clahe_2d::<I,NoisyHist>(&brightness, params)}
     };
     let tuned_brightness = tuned_brightness.into_shape((h, w)).unwrap();
     let brightness_f: Array2<f32> = brightness.mapv(|v| f32::from(v.max(I::one()))).into_shape((h, w)).unwrap();
@@ -141,21 +226,6 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let mut brightness_relation_f: Array2<f32> = tuned_brightness.clone() / brightness_f.clone();
     let br_max = *brightness_relation_f.max().unwrap();
 
-/*
-    let cloned_br = brightness_relation_f.clone() / br_max;
-    let mut filtered_brightness = vec![0.0f32; w*h];
-    let device = oidn::Device::new();
-    oidn::RayTracing::new(&device)
-        .data_format(FLOAT)
-        .srgb(false)
-        .image_dimensions(w, h)
-        .filter(&cloned_br.into_raw_vec(), &mut filtered_brightness)
-        .unwrap();
-
-    //filtered_brightness /= cf_brr;
-    let filtered_brightness_i = filtered_brightness.into_iter().map(|v| v.mul(255.0).round() as u8).collect::<Vec<u8>>();
-    DynamicImage::ImageLuma8(GrayImage::from_raw(w as u32, h as u32, filtered_brightness_i).unwrap()).save("/tmp/filtered_brightness_relation.png");
-*/
     let cf_brr = 255.0 / br_max;
     brightness_relation_f *= cf_brr;
     let brightness_relation = brightness_relation_f.into_iter().map(|v| v.round() as u8).collect::<Vec<u8>>();
@@ -174,47 +244,52 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     result_bytes
 }
 
-fn he_2d<I,H>(img_array: &Array2<I>) -> Array2<f32>
+fn he_2d<I,H>(img_array: &Array2<I>, params: &HEParams) -> Array2<f32>
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded, usize: From<I>, f32: From<I>,
       H: Historator<I>
 {
-    let _level: usize = I::max_value().as_();
+    let level: usize = I::max_value().as_();
     let mut hist = H::calc_hist(&img_array.view());
     let _max_hist = hist.max().unwrap().ceil() as usize;
     //dbg!(max_hist);
     //plot_histogram::plot(&format!("/tmp/plots/single_orig.png"), &hist, max_hist);
-    clip_hist(&mut hist, 8.0);
+    let treschold_int = (level + 1) / 32; //8 for u8
+    clip_hist(&mut hist, treschold_int as f32);
     let _max_hist_clipped = hist.max().unwrap().ceil() as usize;
     //dbg!(max_hist_clipped);
     //plot_histogram::plot(&format!("/tmp/plots/single_clip.png"), &hist, max_hist_clipped);
-    let hist_cdf: Array1<f32> = calc_hist_cdf(&hist, usize::from(I::max_value())+1);
+    let hist_cdf: Array1<f32> = calc_hist_cdf(&hist, usize::from(I::max_value())+1, params.limits());
     //plot_histogram::plot(&format!("/tmp/plots/single_cdf.png"), &hist_cdf, level);
 
     
     img_array.mapv(|v: I| hist_cdf[usize::from(v)])
 }
 
-fn clahe_2d<I,H>(img_array: &Array2<I>, blocks: usize) -> Array2<f32>
+fn clahe_2d<I,H>(img_array: &Array2<I>, params: &HEParams) -> Array2<f32>
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, usize: From<I>, u64: From<I>, i32: From<I>, f32: From<I>,
       H: Historator<I>
 {
-    let (m, n) = if let [mm, nn] = img_array.shape() {
+    let (w, h) = if let [mm, nn] = img_array.shape() {
         (*mm, *nn)
     } else {
         panic!("Supposed to be 2D array")
     };
-    let block_m = 2 * (m as f32 / (2 * blocks) as f32).ceil() as usize;
-    let block_n = 2 * (n as f32 / (2 * blocks) as f32).ceil() as usize;
 
-    let mut maps: Vec<Vec<Array1<f32>>> = vec![vec![]; blocks];
+    let blocks_h = params.blocks().size_h;
+    let blocks_w = params.blocks().size_w.unwrap_or_else(|| (blocks_h as f32 * w as f32 / h as f32).round() as usize);
+
+    let block_w = 2 * (w as f32 / (2 * blocks_w) as f32).ceil() as usize;
+    let block_h = 2 * (h as f32 / (2 * blocks_h) as f32).ceil() as usize;
+
+    let mut maps: Vec<Vec<Array1<f32>>> = vec![vec![]; blocks_w];
     let level = usize::from(I::max_value())+1;
-    for i in 0..blocks {
-        for j in 0..blocks {
+    for i in 0..blocks_w {
+        for j in 0..blocks_h {
             //block border
-            let (si, ei) = (i * block_m, (i + 1) * block_m);
-            let (sj, ej) = (j * block_n, (j + 1) * block_n);
+            let (si, ei) = (i * block_w, (i + 1) * block_w);
+            let (sj, ej) = (j * block_h, (j + 1) * block_h);
 
-            let block_view = img_array.slice(s![si..ei.min(m), sj..ej.min(n)]);
+            let block_view = img_array.slice(s![si..ei.min(w), sj..ej.min(h)]);
 
             //Switch hist method here
 
@@ -222,28 +297,30 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_orig.png", i, j), &hist, level);
             //let mut hist = calc_hist_noise(&block_view);
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_clip.png", i, j), &hist, level);
-            let hist_cdf = calc_hist_cdf(&hist, level);
-            clip_hist(&mut hist, 4.0);
+            let hist_cdf = calc_hist_cdf(&hist, level, params.limits());
+            let treschold = level / 32;
+            clip_hist(&mut hist, treschold as f32);
             //plot_histogram::plot(&format!("/tmp/plots/{}_{}_cdf.png", i, j), &hist_cdf, level);
             maps[i].push(hist_cdf);
         }
     }
 
 
-    let block_m = block_m as isize;
-    let block_n = block_n as isize;
+    let block_m = block_w as isize;
+    let block_n = block_h as isize;
 
     let block_m_step = block_m / 2;
     let block_n_step = block_n / 2;
 
-    let mut array_result: Array2<f32> = Array2::zeros((m, n,));
+    let mut array_result: Array2<f32> = Array2::zeros((w, h,));
 
-    let iblocks = blocks as isize;
+    let iblocks_h = blocks_h as isize;
+    let iblocks_w = blocks_w as isize;
 
-    for m_start in (0..m as isize).step_by(block_m_step as usize) {
-        for n_start in (0..n as isize).step_by(block_n_step as usize) {
-            let range_i = m_start..(m_start + block_m_step).min(m as isize);
-            let range_j = n_start..(n_start + block_n_step).min(n as isize);
+    for m_start in (0..w as isize).step_by(block_m_step as usize) {
+        for n_start in (0..h as isize).step_by(block_n_step as usize) {
+            let range_i = m_start..(m_start + block_m_step).min(w as isize);
+            let range_j = n_start..(n_start + block_n_step).min(h as isize);
             let arr_i = Array1::from_iter(&mut range_i.clone());
             let arr_j = Array1::from_iter(&mut range_j.clone());
 
@@ -268,11 +345,11 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
             let corner_block = if r < 0 && c < 0 {
                 Some(((r+1) as usize, (c+1) as usize))
-            } else if r < 0 && c >=iblocks-1 {
+            } else if r < 0 && c >=iblocks_w-1 {
                 Some(((r+1) as usize, c as usize))
             } else if r > 0 && c < 0 {
                 Some((r as usize, (c+1) as usize))
-            } else if r >=iblocks-1 && c >=iblocks-1 {
+            } else if r >=iblocks_w-1 && c >=iblocks_h-1 {
                 Some ((r as usize, c as usize))
             } else {
                 None
@@ -282,7 +359,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
                 //let img_tile = img_array.slice(s![range_i.clone(), range_j.clone()]);
                 let mapped = img_tile.mapv(|elem| maps[rl][cl][elem.to_usize().unwrap()]);
                 mapped.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
-            } else if (r < iblocks-1 && c < iblocks-1) && (r >=0 && c >=0) {
+            } else if (r < iblocks_w-1 && c < iblocks_h-1) && (r >=0 && c >=0) {
                 let rl = r as usize;
                 let cl = c as usize;
 
@@ -299,22 +376,22 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
                 let mapped_mult_sum: Array2<f32> = arr_y1_sub * (xs_mlu + x_mlb) + arr_y1 * (xs_mru + x_mrb);
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
-            } else if r < 0 || r >=iblocks-1 {
-                let rl = r.max(0).min(iblocks-1) as usize;
+            } else if r < 0 || r >=iblocks_w-1 {
+                let rl = r.max(0).min(iblocks_w-1) as usize;
                 let cl = c as usize;
                 let mapped_left = arr_y1_sub * img_tile.mapv(|elem| maps[rl][cl][elem.to_usize().unwrap()]);
                 let mapped_right = arr_y1 * img_tile.mapv(|elem| maps[rl][cl+1][elem.to_usize().unwrap()]);
                 let mapped_mult_sum = mapped_left + mapped_right;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
-            } else if c < 0 || c >=iblocks-1 {
+            } else if c < 0 || c >=iblocks_h-1 {
                 let rl = r as usize;
-                let cl = c.max(0).min(iblocks-1) as usize;
+                let cl = c.max(0).min(iblocks_h-1) as usize;
                 let mapped_up = arr_x1_sub * img_tile.mapv(|elem| maps[rl][cl][elem.to_usize().unwrap()]);
                 let mapped_bottom = arr_x1 * img_tile.mapv(|elem| maps[rl+1][cl][elem.to_usize().unwrap()]);
                 let mapped_mult_sum = mapped_up + mapped_bottom;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
             } else {
-                panic!("Should not be reached! r={r}, c={c}, iblocks={iblocks}")
+                panic!("Should not be reached! r={r}, c={c}, iblocks_h={iblocks_h}, iblocks_w={iblocks_w}")
             }
         }
     }
@@ -434,44 +511,42 @@ where I: HSLable + std::convert::TryFrom<i32>
     result
 }
 
-fn calc_hist_cdf(hist: &Array1<f32>, level: usize) -> Array1<f32> {
+fn calc_hist_cdf(hist: &Array1<f32>, level: usize, limits: &BrightnessLimits) -> Array1<f32> {
     let first_nz = hist.iter().enumerate().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
-    let _last_nz = hist.iter().enumerate().rev().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
+    let last_nz = hist.iter().enumerate().rev().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
     let total_nz = hist.iter().filter(|v| v>&&0.0).count();
     let mut hist_cumsum: Array1<f32> = hist.iter().cloned().collect(); //.take(last_nz+1)
     let _length = hist_cumsum.len();
     //let last_nz_tst = [0.0,1.0,2.0,3.0,4.0,5.0].into_iter().enumerate().rev().find(|(i, v)| v>&0.0).unwrap().0;
     //dbg!(length, first_nz, last_nz, last_nz_tst);
+
     hist_cumsum.accumulate_axis_inplace(Axis(0), |&prev, curr| *curr += prev);
 
     //Limit contrast range to near original
-    let min_level = first_nz;
-    //let max_level = ((last_nz + level - 1) / 2).max(1);
-    let max_level = (level - 1).min(min_level + total_nz * 25);
 
-    // Unlimited contrast
-    //let max_level = level - 1;
-    //let min_level = 0;
+    let min_level = first_nz as f32 * limits.dark_limit;
+    let max_level = last_nz as f32 + (level - 1 - last_nz) as f32 * limits.bright_limit;
+
 
     let actual_min = hist[first_nz];
     let actual_max = *hist_cumsum.max().unwrap();
+    let upper_bound = (level - 1) as f32;
 
     hist_cumsum -= actual_min;
 
-    //(actual_max - actual_min) * X = max_level - min_level
-    //X = (max_level - min_level) / (actual_max - actual_min)
-
-    let cf = (max_level - min_level) as f32 / (actual_max - actual_min).max(1.0);
+    let cf = (max_level - min_level) / (actual_max - actual_min).max(1.0);
 
     hist_cumsum *= cf;
-    hist_cumsum += min_level as f32;
+    hist_cumsum += min_level;
 
-    hist_cumsum = hist_cumsum.mapv(|v|v.max(0.0));
+    #[cfg(debug_assertions)]{
+        let hist_max = *hist_cumsum.max().unwrap();
+        let hist_min = *hist_cumsum.min().unwrap();
+        assert!(hist_min>0.0);
+        assert!(hist_max<=upper_bound);
+    }
 
-    let hist_max = *hist_cumsum.max().unwrap();
-    let hist_min = *hist_cumsum.min().unwrap();
-
-    dbg!(hist_min, hist_max);
+    hist_cumsum = hist_cumsum.mapv(|v|v.clamp(0.0, upper_bound));
 
     hist_cumsum
 }
@@ -483,13 +558,8 @@ mod tests {
     use crate::{calc_local_noise, load_8bit_img_as_array, Method, transform_any_8bit_image};
 
     #[test]
-    fn test_8_bit() {
-        transform_any_8bit_image("car.png", "car_out.png", 8, Method::CLAHE);
-    }
-
-    #[test]
     fn test_local_noise() {
-        let (_l, img) = load_8bit_img_as_array("car.png");
+        let (_l, img) = load_8bit_img_as_array("car.jpg");
         let br_img: Array2<u8> = img.mean_axis(Axis(2)).unwrap();
         let noise_img = calc_local_noise(&br_img.view());
         let shape_out = noise_img.raw_dim();

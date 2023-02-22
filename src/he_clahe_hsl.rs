@@ -2,11 +2,11 @@ use std::fmt::Debug;
 
 use itertools::Itertools;
 use ndarray::{Array1, Array2, Array3, ArrayView1, ArrayView3, Axis, s, Zip};
-use crate::{calc_hist_cdf, clip_hist};
+use crate::{BlocksCount, BrightnessLimits, calc_hist_cdf, clip_hist, HEParams};
 use crate::line_up_colors::{calc_hue, HSL, HSLable, HueDist};
 use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, PrimInt, sign::Unsigned, ToPrimitive, Zero};
 
-fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
+fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize, params: &HEParams) -> Vec<Array1<f32>>
 {
     let hist_li: Array1<f32> = Array1::zeros((level,));
     let hist_rg: Array1<f32> = Array1::zeros((level,));
@@ -44,8 +44,9 @@ fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize) -> Vec<Array1<f32>>
             eprintln!("Found full zeros at {i}");
             hist.clone()
         } else {
-            let hist_cdf = calc_hist_cdf(hist, level);
-            clip_hist(hist, 4.0);
+            let hist_cdf = calc_hist_cdf(hist, level, params.limits());
+            let treschold = (level + 1) / 32;
+            clip_hist(hist, treschold as f32);
             hist_cdf
         }
     }).collect()
@@ -68,7 +69,7 @@ where I: HSLable + Debug + Float + std::ops::Mul<Output = I> + HueDist<I>, f32: 
     v_val + hue0_val + hue1_val
 }
 
-pub(crate) fn he_2d_hsl<I>(img_array: &Array3<I>, level: usize) -> Array2<f32>
+pub(crate) fn he_2d_hsl<I>(img_array: &Array3<I>, level: usize, params: &HEParams) -> Array2<f32>
 where I: HSLable
 {
     let shape = img_array.shape();
@@ -76,8 +77,8 @@ where I: HSLable
     let w = shape[1];
 
     let hsl_arr = calc_hue(img_array);
-    let clipped_hists = calc_hist_hsl(&hsl_arr.view(), level);
-    let hists_cdf: Vec<Array1<f32>> = clipped_hists.into_iter().map(|hist| calc_hist_cdf(&hist, level)).collect();
+    let clipped_hists = calc_hist_hsl(&hsl_arr.view(), level, params);
+    let hists_cdf: Vec<Array1<f32>> = clipped_hists.into_iter().map(|hist| calc_hist_cdf(&hist, level, params.limits())).collect();
 
     let result: Array2<f32> = Array2::from_shape_vec((h, w), hsl_arr
         .lanes(Axis(2))
@@ -88,33 +89,37 @@ where I: HSLable
     result
 }
 
-pub fn clahe_2d_hsl<I>(img_array: &Array3<I>, blocks: usize) -> Array2<f32>
+pub fn clahe_2d_hsl<I>(img_array: &Array3<I>, params: &HEParams) -> Array2<f32>
 //where I: HSLable
 where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::AddAssign + Debug + Bounded + std::convert::TryFrom<i32>, usize: From<I>, u64: From<I>, i32: From<I>, f32: From<I>
 {
-    let (m, n) = if let [mm, nn, _cc] = img_array.shape() {
+    let (w, h) = if let [mm, nn, _cc] = img_array.shape() {
         (*mm, *nn)
     } else {
         panic!("Supposed to be 3D array")
     };
     let level = usize::from(I::max_value()) + usize::from(I::from(1u32).unwrap());
-    let block_m = 2 * (m as f32 / (2 * blocks) as f32).ceil() as usize;
-    let block_n = 2 * (n as f32 / (2 * blocks) as f32).ceil() as usize;
 
-    let mut maps: Vec<Vec<Vec<Array1<f32>>>> = vec![vec![vec![]; blocks]; blocks];
+    let blocks_h = params.blocks().size_h;
+    let blocks_w = params.blocks().size_w.unwrap_or_else(|| (blocks_h as f32 * w as f32 / h as f32).round() as usize);
+
+    let block_m = 2 * (w as f32 / (2 * blocks_w) as f32).ceil() as usize;
+    let block_n = 2 * (h as f32 / (2 * blocks_h) as f32).ceil() as usize;
+
+    let mut maps: Vec<Vec<Vec<Array1<f32>>>> = vec![vec![vec![]; blocks_h]; blocks_w];
     let hsl_arr = calc_hue(img_array);
 
-    for i in 0..blocks {
-        for j in 0..blocks {
+    for i in 0..blocks_w {
+        for j in 0..blocks_h {
             //block border
             let (si, ei) = (i * block_m, (i + 1) * block_m);
             let (sj, ej) = (j * block_n, (j + 1) * block_n);
 
-            let block_view_hsl = hsl_arr.slice(s![si..ei.min(m), sj..ej.min(n), 0..3usize]);
+            let block_view_hsl = hsl_arr.slice(s![si..ei.min(w), sj..ej.min(h), 0..3usize]);
 
             //Switch hist method here
 
-            let hist = calc_hist_hsl(&block_view_hsl, level);
+            let hist = calc_hist_hsl(&block_view_hsl, level, params);
             maps[i][j] = hist;
         }
     }
@@ -126,14 +131,15 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
     let block_m_step = block_m / 2;
     let block_n_step = block_n / 2;
 
-    let mut array_result: Array2<f32> = Array2::zeros((m, n, ));
+    let mut array_result: Array2<f32> = Array2::zeros((w, h, ));
 
-    let iblocks = blocks as isize;
+    let iblocks_h = blocks_h as isize;
+    let iblocks_w = blocks_w as isize;
 
-    for m_start in (0..m as isize).step_by(block_m_step as usize) {
-        for n_start in (0..n as isize).step_by(block_n_step as usize) {
-            let range_i = m_start..(m_start + block_m_step).min(m as isize);
-            let range_j = n_start..(n_start + block_n_step).min(n as isize);
+    for m_start in (0..w as isize).step_by(block_m_step as usize) {
+        for n_start in (0..h as isize).step_by(block_n_step as usize) {
+            let range_i = m_start..(m_start + block_m_step).min(w as isize);
+            let range_j = n_start..(n_start + block_n_step).min(h as isize);
             let arr_i = Array1::from_iter(&mut range_i.clone());
             let arr_j = Array1::from_iter(&mut range_j.clone());
 
@@ -158,11 +164,11 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
             let corner_block = if r < 0 && c < 0 {
                 Some(((r + 1) as usize, (c + 1) as usize))
-            } else if r < 0 && c >= iblocks - 1 {
+            } else if r < 0 && c >= iblocks_h - 1 {
                 Some(((r + 1) as usize, c as usize))
             } else if r > 0 && c < 0 {
                 Some((r as usize, (c + 1) as usize))
-            } else if r >= iblocks - 1 && c >= iblocks - 1 {
+            } else if r >= iblocks_w - 1 && c >= iblocks_h - 1 {
                 Some((r as usize, c as usize))
             } else {
                 None
@@ -173,7 +179,7 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
                         .and(array_result.slice_mut(s![range_i.clone(), range_j.clone()]))
                         .for_each(|h, v| *v = apply_hist_hsl(&h, &maps[rl][cl]));
                 //mapped.assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone(), 0..3]).mapv_into());
-            } else if (r < iblocks - 1 && c < iblocks - 1) && (r >= 0 && c >= 0) {
+            } else if (r < iblocks_w - 1 && c < iblocks_h - 1) && (r >= 0 && c >= 0) {
                 let rl = r as usize;
                 let cl = c as usize;
 
@@ -190,22 +196,22 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
                 let mapped_mult_sum: Array2<f32> = arr_y1_sub * (xs_mlu + x_mlb) + arr_y1 * (xs_mru + x_mrb);
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
-            } else if r < 0 || r >= iblocks - 1 {
-                let rl = r.max(0).min(iblocks - 1) as usize;
+            } else if r < 0 || r >= iblocks_w - 1 {
+                let rl = r.max(0).min(iblocks_w - 1) as usize;
                 let cl = c as usize;
                 let mapped_left = arr_y1_sub * Zip::from(hsl_tile.lanes(Axis(2))).map_collect(|h| apply_hist_hsl(&h, &maps[rl][cl]) );
                 let mapped_right = arr_y1 * Zip::from(hsl_tile.lanes(Axis(2))).map_collect(|h| apply_hist_hsl(&h, &maps[rl][cl +1 ]) );
                 let mapped_mult_sum = mapped_left + mapped_right;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
-            } else if c < 0 || c >= iblocks - 1 {
+            } else if c < 0 || c >= iblocks_h - 1 {
                 let rl = r as usize;
-                let cl = c.max(0).min(iblocks - 1) as usize;
+                let cl = c.max(0).min(iblocks_h - 1) as usize;
                 let mapped_up = arr_x1_sub * Zip::from(hsl_tile.lanes(Axis(2))).map_collect(|h| apply_hist_hsl(&h, &maps[rl][cl]) );
                 let mapped_bottom = arr_x1 * Zip::from(hsl_tile.lanes(Axis(2))).map_collect(|h| apply_hist_hsl(&h, &maps[rl + 1][cl]) );
                 let mapped_mult_sum = mapped_up + mapped_bottom;
                 mapped_mult_sum.view().assign_to(array_result.slice_mut(s![range_i.clone(), range_j.clone()]));
             } else {
-                panic!("Should not be reached! r={r}, c={c}, iblocks={iblocks}")
+                panic!("Should not be reached! r={r}, c={c}, iblocks_h={iblocks_h}, iblocks_w={iblocks_w}")
             }
         }
     }

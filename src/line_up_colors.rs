@@ -1,10 +1,7 @@
-
 use std::ops::{Add, AddAssign, Sub};
-
-
 use ndarray::{array, Array1, Array2, Array3, ArrayView1, ArrayView2, Axis};
 use ndarray_stats::QuantileExt;
-use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, NumCast, One, ToPrimitive, Zero};
+use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, One, ToPrimitive, Zero};
 use num_traits::real::Real;
 
 pub(crate) trait HSL<I> {
@@ -146,14 +143,19 @@ pub trait HueDist<T> {
 }
 
 impl<T> HueDist<T> for T
-where T: std::ops::Rem<Output = T>, T: HSLable + std::ops::Div<Output = T>, u32: AsPrimitive<T>
+where T: std::ops::Rem<Output = T>, T: HSLable + Float + std::ops::Div<Output = T>, u32: AsPrimitive<T>
 {
     fn calc_hue_start(&self) -> T {
         *self / 120u32.as_()
     }
     fn calc_hue_distance(&self) -> T {
         let f120: T = 120u32.as_();
-        (*self % f120) / f120
+        let sstart = self.calc_hue_start();
+        if sstart.round() > sstart || true {
+            *self % f120 //Dist to previous
+        } else {
+            sstart.floor() % f120 //Dist to next
+        }.div(f120)
     }
 }
 
@@ -167,7 +169,7 @@ mod tests {
 
     #[test]
     fn test_hue_convertor() {
-        let (_l, img) = load_8bit_img_as_array("huetest.png");
+        let (_l, img) = load_8bit_img_as_array("mandarin_duck.jpg");
         let hue_unaligled = calc_hue(&img);
         let hue_aligled = hue_unaligled
             .lanes(Axis(2))
@@ -177,6 +179,6 @@ mod tests {
             .collect::<Vec<u8>>();
         let shape_out = hue_unaligled.shape();
         let img_out = DynamicImage::ImageLuma8(GrayImage::from_raw(shape_out[1] as u32, shape_out[0] as u32, hue_aligled).unwrap());
-        img_out.save("huetest_hue.png").unwrap();
+        img_out.save("mandarin_duck_hue.png").unwrap();
     }
 }

@@ -10,9 +10,12 @@ ndarray-stats = "*"
 png = "*"
 itertools = "*"
 image = "0.24"
-num-traits = {version = "*", features = ["std"]}
+num-traits = { version = "*", features = ["std"] }
 byteorder = "*"
 plotters = "*"
+clap = { version = "4", features = ["derive"] }
+smart_denoise = { path = "../smart_denoise", optional = true }
 
 [features]
-blas = ["ndarray/blas"]
+default = []
+denoise = ["smart_denoise"]
