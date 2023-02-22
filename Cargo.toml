@@ -14,7 +14,7 @@ num-traits = { version = "*", features = ["std"] }
 byteorder = "*"
 plotters = "*"
 clap = { version = "4", features = ["derive"] }
-smart_denoise = { path = "../smart_denoise", optional = true }
+smart_denoise = { git = "https://github.com/inferrna/smart_denoise_rs.git", optional = true }
 
 [features]
 default = []
