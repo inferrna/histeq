@@ -25,6 +25,12 @@ struct Parameters {
     #[arg(long)]
     ///High value for the new histogram. 0.0 means brightest level of original histogram, 1.0 means max possible value. Default to 0.5.
     bright_limit: Option<f32>,
+    #[arg(long)]
+    ///If resulting brightness relation is < 1.0, then relation = relation^dark_power
+    dark_power: Option<f32>,
+    #[arg(long)]
+    ///If resulting brightness relation is > 1.0, then relation = relation^bright_power
+    bright_power: Option<f32>,
     #[cfg(feature = "denoise")]
     #[arg(long)]
     ///Use denoise for histogram computation. Default to false
@@ -42,7 +48,7 @@ fn main() {
     #[cfg(not(feature = "denoise"))]
     let denoise = false;
 
-    let he_params = HEParams::new(blocks, limits, denoise);
+    let he_params = HEParams::new(blocks, limits, params.dark_power, params.bright_power, denoise);
 
     if params.filename_in.to_lowercase().ends_with("png") {
         transform_png_image(&params.filename_in, &params.filename_out, params.method, &he_params);

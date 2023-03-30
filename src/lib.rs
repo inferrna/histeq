@@ -21,6 +21,8 @@ use image::io::Reader as ImageReader;
 use crate::he_clahe_hsl::{clahe_2d_hsl, he_2d_hsl};
 use crate::line_up_colors::HSLable;
 use clap::{Parser, ValueEnum};
+use itertools::max;
+use more_asserts::{assert_ge, assert_gt, assert_le};
 #[cfg(feature = "denoise")]
 use smart_denoise::{Denoiseable, Algo, DenoiseParams, UsingShader};
 
@@ -67,19 +69,21 @@ impl BlocksCount {
 #[derive(Debug, Clone)]
 pub struct HEParams {
     blocks: BlocksCount,
-    limits: BrightnessLimits,
+    blimits: BrightnessLimits,
+    d_pwr: Option<f32>,
+    b_pwr: Option<f32>,
     denoise: bool,
 }
 
 impl HEParams {
-    pub fn new(blocks: BlocksCount, limits: BrightnessLimits, denoise: bool) -> Self {
-        Self { blocks, limits, denoise }
+    pub fn new(blocks: BlocksCount, blimits: BrightnessLimits, d_pwr: Option<f32>, b_pwr: Option<f32>, denoise: bool) -> Self {
+        Self { blocks, blimits: blimits, d_pwr, b_pwr, denoise }
     }
     pub fn blocks(&self) -> &BlocksCount {
         &self.blocks
     }
     pub fn limits(&self) -> &BrightnessLimits {
-        &self.limits
+        &self.blimits
     }
     pub fn denoise(&self) -> bool {
         self.denoise
@@ -102,7 +106,8 @@ fn image_pair_from_buffer<I: Denoiseable>(buffer: Vec<I>, h: usize, w: usize, cc
 }
 #[cfg(not(feature = "denoise"))]
 ///Returns original image and copy of original image.
-fn image_pair_from_buffer<I: Num>(buffer: Vec<I>, h: usize, w: usize, cc: usize, denoise: bool) -> (Rc<Array3<I>>, Rc<Array3<I>>)    {
+fn image_pair_from_buffer<I: Num>(buffer: Vec<I>, h: usize, w: usize, cc: usize, denoise: bool) -> (Rc<Array3<I>>, Rc<Array3<I>>) {
+    assert_eq!(buffer.len(), h*w*cc);
     let array_image = Rc::new(Array3::from_shape_vec((h, w, cc), buffer).unwrap());
     (array_image.clone(), array_image)
 }
@@ -118,7 +123,6 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, method: Method
     let info = png_reader.info();
 
     let (width, height) = (info.width, info.height);
-    let buffer_size = info.raw_bytes();
     let bit_depth = info.bit_depth;
     let color_type = info.color_type;
 
@@ -130,26 +134,30 @@ pub fn transform_png_image(filename_in: &str, filename_out: &str, method: Method
     encoder.set_color(color_type);
     encoder.set_depth(bit_depth);
 
+    let colors = color_type.samples();
+
+    let buffer_size = colors * (width * height) as usize;
+
     let mut buffer = vec![0; buffer_size];
     png_reader.next_frame(&mut buffer).unwrap();
 
 
     match bit_depth {
         BitDepth::Eight => {
-            let (array_image, array2hist) = image_pair_from_buffer(buffer, height as usize, width as usize, color_type.samples(), params.denoise);
+            let (array_image, array2hist) = image_pair_from_buffer(buffer, height as usize, width as usize, colors, params.denoise);
 
             let result_bytes = equalize_full_image(array_image, array2hist, method, params);
             let mut writer = encoder.write_header().unwrap();
             writer.write_image_data(&result_bytes.into_iter().collect::<Vec<u8>>()).unwrap();
         }
         BitDepth::Sixteen => {
-            let (h, w, cc) = (height as usize, width as usize, color_type.samples());
+            let (h, w, cc) = (height as usize, width as usize, colors);
             let mut buffer_u16 = vec![0; h * w * cc];
             let mut buffer_cursor = Cursor::new(buffer);
             buffer_cursor
                 .read_u16_into::<BigEndian>(&mut buffer_u16)
                 .unwrap();
-            let (array_image, array2hist) = image_pair_from_buffer(buffer_u16, height as usize, width as usize, color_type.samples(), params.denoise);
+            let (array_image, array2hist) = image_pair_from_buffer(buffer_u16, height as usize, width as usize, colors, params.denoise);
             let result_bytes = equalize_full_image(array_image, array2hist, method, params);
 
             let buffer_u8_le = result_bytes.into_iter().flat_map(|v: u16| v.to_be_bytes()).collect::<Vec<u8>>();
@@ -224,21 +232,34 @@ where I: HSLable + PrimInt + Unsigned + FromPrimitive + ToPrimitive + std::ops::
 
     //Save lima multiplier as image
     let mut brightness_relation_f: Array2<f32> = tuned_brightness.clone() / brightness_f.clone();
-    let br_max = *brightness_relation_f.max().unwrap();
 
-    let cf_brr = 255.0 / br_max;
-    brightness_relation_f *= cf_brr;
-    let brightness_relation = brightness_relation_f.into_iter().map(|v| v.round() as u8).collect::<Vec<u8>>();
-    DynamicImage::ImageLuma8(GrayImage::from_raw(w as u32, h as u32, brightness_relation).unwrap())
-        .save("/tmp/brightness_relation.png").unwrap();
+    #[cfg(debug_assertions)]{
+        let br_max = brightness_relation_f.max().unwrap();
+        let cf_brr = 255.0 / br_max;
+        let brightness_relation_f_2save = brightness_relation_f.clone() * cf_brr;
+        let brightness_relation = brightness_relation_f_2save
+            .into_iter()
+            .map(|v| v.round() as u8).collect::<Vec<u8>>();
+        DynamicImage::ImageLuma8(GrayImage::from_raw(w as u32, h as u32, brightness_relation).unwrap())
+            .save("/tmp/brightness_relation.png").unwrap();
+    }
 
+    if let Some(dark_power) = params.d_pwr {
+        brightness_relation_f.mapv_inplace(|v| if v < 1.0f32 {
+            v.powf(dark_power)
+        } else { v })
+    }
+    if let Some(bright_power) = params.b_pwr {
+        brightness_relation_f.mapv_inplace(|v| if v > 1.0f32 {
+            v.powf(bright_power)
+        } else { v })
+    }
 
-    let tuned_brightness = tuned_brightness.into_shape((h, w, 1)).unwrap();
-    let brightness_f = brightness_f.into_shape((h, w, 1)).unwrap();
+    let brightness_relation_f = brightness_relation_f.into_shape((h, w, 1)).unwrap();
 
 
     // Align full RGB image
-    let result_float: Array3<f32> = array.mapv(|elem| f32::from(elem)) * tuned_brightness / brightness_f;
+    let result_float: Array3<f32> = array.mapv(|elem| f32::from(elem)) * brightness_relation_f;
     let result_bytes: Array3<I> = result_float.mapv(|elem| I::from_u32((elem.round() as u32).min(max_val)).unwrap());
 
     result_bytes
@@ -512,25 +533,27 @@ where I: HSLable + std::convert::TryFrom<i32>
 }
 
 fn calc_hist_cdf(hist: &Array1<f32>, level: usize, limits: &BrightnessLimits) -> Array1<f32> {
-    let first_nz = hist.iter().enumerate().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
-    let last_nz = hist.iter().enumerate().rev().find(|(_i, v)| v>&&0.0).unwrap().0.max(1);
+    calc_hist_cdf_opt(hist, level, limits).unwrap_or_else(|| hist.clone())
+}
+fn calc_hist_cdf_opt(hist: &Array1<f32>, level: usize, limits: &BrightnessLimits) -> Option<Array1<f32>> {
+    let first_nz = hist.iter().enumerate().find(|(_i, v)| v>&&0.0)?.0.max(1);
+    let last_nz = hist.iter().enumerate().rev().find(|(_i, v)| v>&&0.0)?.0.max(1);
     let total_nz = hist.iter().filter(|v| v>&&0.0).count();
     let mut hist_cumsum: Array1<f32> = hist.iter().cloned().collect(); //.take(last_nz+1)
     let _length = hist_cumsum.len();
-    //let last_nz_tst = [0.0,1.0,2.0,3.0,4.0,5.0].into_iter().enumerate().rev().find(|(i, v)| v>&0.0).unwrap().0;
-    //dbg!(length, first_nz, last_nz, last_nz_tst);
+
 
     hist_cumsum.accumulate_axis_inplace(Axis(0), |&prev, curr| *curr += prev);
+    let upper_bound = (level - 1) as f32;
 
     //Limit contrast range to near original
-
+/*
     let min_level = first_nz as f32 * limits.dark_limit;
     let max_level = last_nz as f32 + (level - 1 - last_nz) as f32 * limits.bright_limit;
 
 
     let actual_min = hist[first_nz];
     let actual_max = *hist_cumsum.max().unwrap();
-    let upper_bound = (level - 1) as f32;
 
     hist_cumsum -= actual_min;
 
@@ -538,17 +561,21 @@ fn calc_hist_cdf(hist: &Array1<f32>, level: usize, limits: &BrightnessLimits) ->
 
     hist_cumsum *= cf;
     hist_cumsum += min_level;
+*/
+    let cf = upper_bound / hist_cumsum.max().unwrap();
+
+    hist_cumsum *= cf;
 
     #[cfg(debug_assertions)]{
         let hist_max = *hist_cumsum.max().unwrap();
         let hist_min = *hist_cumsum.min().unwrap();
-        assert!(hist_min>0.0);
-        assert!(hist_max<=upper_bound);
+        assert_ge!(hist_min, 0.0);
+        assert_le!(hist_max, upper_bound*1.0001);
     }
 
     hist_cumsum = hist_cumsum.mapv(|v|v.clamp(0.0, upper_bound));
 
-    hist_cumsum
+    Some(hist_cumsum)
 }
 
 #[cfg(test)]

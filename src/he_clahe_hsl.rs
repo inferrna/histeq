@@ -8,10 +8,10 @@ use num_traits::{AsPrimitive, Bounded, Float, FromPrimitive, PrimInt, sign::Unsi
 
 fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize, params: &HEParams) -> Vec<Array1<f32>>
 {
-    let hist_li: Array1<f32> = Array1::zeros((level,));
     let hist_rg: Array1<f32> = Array1::zeros((level,));
     let hist_gb: Array1<f32> = Array1::zeros((level,));
     let hist_br: Array1<f32> = Array1::zeros((level,));
+    let hist_li: Array1<f32> = Array1::zeros((level,));
 
     let mut all_hue_arrays = vec![hist_rg, hist_gb, hist_br, hist_li];
 
@@ -44,9 +44,24 @@ fn calc_hist_hsl(img_array: &ArrayView3<f32>, level: usize, params: &HEParams) -
             eprintln!("Found full zeros at {i}");
             hist.clone()
         } else {
+            #[cfg(debug_assertions)]{
+                println!("<{i} orig");
+                for (i, h) in hist.iter().enumerate() {
+                    let hi = h.round() as u32;
+                    if hi > 0 { print!("{i}:{},", hi) }
+                }
+                println!(" {i} orig>");
+            }
             let hist_cdf = calc_hist_cdf(hist, level, params.limits());
-            let treschold = (level + 1) / 32;
-            clip_hist(hist, treschold as f32);
+            #[cfg(debug_assertions)]{
+                println!("<{i} cdf");
+                for (i, h) in hist_cdf.iter().enumerate() {
+                    let hi = h.round() as u32;
+                    if hi > 0 { print!("{i}:{},", hi) }
+                }
+                println!(" {i} cdf>");
+            }
+
             hist_cdf
         }
     }).collect()
@@ -61,11 +76,10 @@ where I: HSLable + Debug + Float + std::ops::Mul<Output = I> + HueDist<I>, f32: 
     let colored_val = I::one() - saturated_val;
     //let h_lightness = &hists_cdf[3][v];
     let v_val = hists_cdf[3][v] * saturated_val;
-    let hue_idx: usize = ( h.hue().calc_hue_start().round() ).as_();
+    let hue_idx: usize = ( h.hue().calc_hue_start() ).as_();
     let dist2next: I = h.hue().calc_hue_distance();
     let hue0_val = hists_cdf[hue_idx % 3][v] * (I::one() - dist2next) * colored_val;
     let hue1_val = hists_cdf[(hue_idx+1) % 3][v] * dist2next * colored_val;
-    //(128.0 * ((hue1_val.is_nan()) as u32 as f32) ).as_()
     v_val + hue0_val + hue1_val
 }
 
@@ -77,9 +91,15 @@ where I: HSLable
     let w = shape[1];
 
     let hsl_arr = calc_hue(img_array);
-    let clipped_hists = calc_hist_hsl(&hsl_arr.view(), level, params);
-    let hists_cdf: Vec<Array1<f32>> = clipped_hists.into_iter().map(|hist| calc_hist_cdf(&hist, level, params.limits())).collect();
-
+    let hists_cdf = calc_hist_hsl(&hsl_arr.view(), level, params);
+/*
+    let hists_cdf: Vec<Array1<f32>> = clipped_hists.into_iter()
+        .enumerate().map(|(i, hist)| {
+            #[cfg(debug_assertions)]
+            dbg!(i);
+            calc_hist_cdf(&hist, level, params.limits())
+        }).collect();
+*/
     let result: Array2<f32> = Array2::from_shape_vec((h, w), hsl_arr
         .lanes(Axis(2))
         .into_iter()

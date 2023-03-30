@@ -15,6 +15,7 @@ byteorder = "*"
 plotters = "*"
 clap = { version = "4", features = ["derive"] }
 smart_denoise = { git = "https://github.com/inferrna/smart_denoise_rs.git", optional = true }
+more-asserts = { version = "0.3.1", optional = false }
 
 [features]
 default = []

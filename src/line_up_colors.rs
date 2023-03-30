@@ -93,20 +93,22 @@ where I: HSLable
             let diff: f32 = (max_val_i - min_val).as_();
             let ca: f32 = ca.as_();
             let cb: f32 = cb.as_();
-            let h: f32 = 60.0f32 * ( shift + (ca - cb) / diff.max(f32::MIN_POSITIVE) );
+            let h: f32 = 240f32 + 60f32 * ( shift + (ca - cb) / diff.max(f32::MIN_POSITIVE) );
 
             let hue = (360.0 + h) % 360.0;
 
-            assert!(!hue.is_nan());
-            assert!(!saturation.is_nan());
-            assert!(!max_val_f.is_nan());
-            assert!(hue.is_finite());
-            assert!(saturation.is_finite());
-            assert!(max_val_f.is_finite());
+            #[cfg(debug_assertions)]{
+                assert!(!hue.is_nan());
+                assert!(!saturation.is_nan());
+                assert!(!max_val_f.is_nan());
+                assert!(hue.is_finite());
+                assert!(saturation.is_finite());
+                assert!(max_val_f.is_finite());
 
-            assert!(hue>=0.0);
-            assert!(saturation>=0.0);
-            assert!(max_val_f>=0.0);
+                assert!(hue >= 0.0);
+                assert!(saturation >= 0.0);
+                assert!(max_val_f >= 0.0);
+            }
 
             array![hue, saturation, max_val_f]
             //array![(360.0 + h) % 360.0, saturation, 192.0]
@@ -146,21 +148,18 @@ impl<T> HueDist<T> for T
 where T: std::ops::Rem<Output = T>, T: HSLable + Float + std::ops::Div<Output = T>, u32: AsPrimitive<T>
 {
     fn calc_hue_start(&self) -> T {
-        *self / 120u32.as_()
+        (*self / 120u32.as_()).round()
     }
     fn calc_hue_distance(&self) -> T {
         let f120: T = 120u32.as_();
-        let sstart = self.calc_hue_start();
-        if sstart.round() > sstart || true {
-            *self % f120 //Dist to previous
-        } else {
-            sstart.floor() % f120 //Dist to next
-        }.div(f120)
+        f120.sub(*self % f120 ).div(f120)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::env::args;
+    use std::path::Path;
     use image::{DynamicImage, GrayImage};
     use ndarray::{Axis};
     use crate::{load_8bit_img_as_array};
@@ -169,16 +168,22 @@ mod tests {
 
     #[test]
     fn test_hue_convertor() {
-        let (_l, img) = load_8bit_img_as_array("mandarin_duck.jpg");
+        let file_location = args().skip(1).last().unwrap();
+        let path = Path::new(&file_location);
+        let (_l, img) = load_8bit_img_as_array(&file_location);
         let hue_unaligled = calc_hue(&img);
         let hue_aligled = hue_unaligled
             .lanes(Axis(2))
             .into_iter()
-            .map(|v| (255.0 * (180.0 - v.hue() % 180.0) / 180.0).round() as u8)
+            //.map(|v| (255.0 * (180.0 - v.hue() % 180.0) / 180.0).round() as u8)
+            //.map(|v| (v.lightness()).round() as u8)
+            .map(|v| (v.saturation()).round() as u8)
             //.map(|v| v[2].round() as u8)
             .collect::<Vec<u8>>();
         let shape_out = hue_unaligled.shape();
         let img_out = DynamicImage::ImageLuma8(GrayImage::from_raw(shape_out[1] as u32, shape_out[0] as u32, hue_aligled).unwrap());
-        img_out.save("mandarin_duck_hue.png").unwrap();
+        let old_fnm = path.file_name().unwrap().to_str().unwrap();
+        let new_fnm = format!("hue_{old_fnm}");
+        img_out.save(path.with_file_name(new_fnm)).unwrap();
     }
 }
